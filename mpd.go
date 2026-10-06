@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,78 @@ type PlaylistMetadata struct {
 		Ucp             string   `json:"ucp"`
 		Version         string   `json:"version"`
 	} `json:"metadata"`
+}
+
+type Initialization struct {
+	Text  string `xml:",chardata"`
+	Range string `xml:"range,attr"`
+}
+
+type SegmentBase struct {
+	Text            string         `xml:",chardata"`
+	IndexRange      string         `xml:"indexRange,attr"`
+	IndexRangeExact string         `xml:"indexRangeExact,attr"`
+	Initialization  Initialization `xml:"Initialization"`
+}
+
+type SegmentTemplate struct {
+	Text           string `xml:",chardata"`
+	Duration       string `xml:"duration,attr"`
+	Timescale      string `xml:"timescale,attr"`
+	Initialization string `xml:"initialization,attr"`
+	Media          string `xml:"media,attr"`
+	StartNumber    string `xml:"startNumber,attr"`
+}
+
+type AudioChannelConfiguration struct {
+	Text        string `xml:",chardata"`
+	SchemeIdUri string `xml:"schemeIdUri,attr"`
+	Value       string `xml:"value,attr"`
+}
+
+type Laurl struct {
+	Text    string `xml:",chardata"`
+	LicType string `xml:"Lic_type,attr"`
+}
+
+type ContentProtection struct {
+	Text        string `xml:",chardata"`
+	SchemeIdUri string `xml:"schemeIdUri,attr"`
+	Value       string `xml:"value,attr"`
+	DefaultKID  string `xml:"default_KID,attr"`
+	Laurl       Laurl  `xml:"Laurl"`
+}
+
+type Representation struct {
+	Text                      string                    `xml:",chardata"`
+	ID                        string                    `xml:"id,attr"`
+	AudioSamplingRate         string                    `xml:"audioSamplingRate,attr"`
+	Bandwidth                 string                    `xml:"bandwidth,attr"`
+	MimeType                  string                    `xml:"mimeType,attr"`
+	Codecs                    string                    `xml:"codecs,attr"`
+	BaseURL                   string                    `xml:"BaseURL"`
+	SegmentTemplate           SegmentTemplate           `xml:"SegmentTemplate"`
+	SegmentBase               *SegmentBase              `xml:"SegmentBase"`
+	AudioChannelConfiguration AudioChannelConfiguration `xml:"AudioChannelConfiguration"`
+}
+
+type AdaptationSet struct {
+	Text               string              `xml:",chardata"`
+	ID                 string              `xml:"id,attr"`
+	ContentType        string              `xml:"contentType,attr"`
+	StartWithSAP       string              `xml:"startWithSAP,attr"`
+	SegmentAlignment   string              `xml:"segmentAlignment,attr"`
+	BitstreamSwitching string              `xml:"bitstreamSwitching,attr"`
+	Representation     []Representation    `xml:"Representation"`
+	ContentProtection  []ContentProtection `xml:"ContentProtection"`
+}
+
+type Period struct {
+	Text          string          `xml:",chardata"`
+	ID            string          `xml:"id,attr"`
+	Start         string          `xml:"start,attr"`
+	Duration      string          `xml:"duration,attr"`
+	AdaptationSet []AdaptationSet `xml:"AdaptationSet"`
 }
 
 type MPD struct {
@@ -43,50 +116,53 @@ type MPD struct {
 	MinBufferTime             string   `xml:"minBufferTime,attr"`
 	BaseURL                   string   `xml:"BaseURL"`
 	ProgramInformation        string   `xml:"ProgramInformation"`
-	Period                    struct {
-		Text          string `xml:",chardata"`
-		ID            string `xml:"id,attr"`
-		Start         string `xml:"start,attr"`
-		AdaptationSet []struct {
-			Text               string `xml:",chardata"`
-			ID                 string `xml:"id,attr"`
-			ContentType        string `xml:"contentType,attr"`
-			StartWithSAP       string `xml:"startWithSAP,attr"`
-			SegmentAlignment   string `xml:"segmentAlignment,attr"`
-			BitstreamSwitching string `xml:"bitstreamSwitching,attr"`
-			Representation     []struct {
-				Text              string `xml:",chardata"`
-				ID                string `xml:"id,attr"`
-				AudioSamplingRate string `xml:"audioSamplingRate,attr"`
-				Bandwidth         string `xml:"bandwidth,attr"`
-				MimeType          string `xml:"mimeType,attr"`
-				Codecs            string `xml:"codecs,attr"`
-				SegmentTemplate   struct {
-					Text           string `xml:",chardata"`
-					Duration       string `xml:"duration,attr"`
-					Timescale      string `xml:"timescale,attr"`
-					Initialization string `xml:"initialization,attr"`
-					Media          string `xml:"media,attr"`
-					StartNumber    string `xml:"startNumber,attr"`
-				} `xml:"SegmentTemplate"`
-				AudioChannelConfiguration struct {
-					Text        string `xml:",chardata"`
-					SchemeIdUri string `xml:"schemeIdUri,attr"`
-					Value       string `xml:"value,attr"`
-				} `xml:"AudioChannelConfiguration"`
-			} `xml:"Representation"`
-			ContentProtection []struct {
-				Text        string `xml:",chardata"`
-				SchemeIdUri string `xml:"schemeIdUri,attr"`
-				Value       string `xml:"value,attr"`
-				DefaultKID  string `xml:"default_KID,attr"`
-				Laurl       struct {
-					Text    string `xml:",chardata"`
-					LicType string `xml:"Lic_type,attr"`
-				} `xml:"Laurl"`
-			} `xml:"ContentProtection"`
-		} `xml:"AdaptationSet"`
-	} `xml:"Period"`
+	Period                    Period   `xml:"Period"`
+}
+
+func (r *Representation) MediaURL(mpdbaseurl string, fallbackbaseurl string) string {
+	representationurl := strings.TrimSpace(r.BaseURL)
+
+	if representationurl == "" {
+		return fallbackbaseurl
+	}
+
+	if strings.HasPrefix(representationurl, "http://") || strings.HasPrefix(representationurl, "https://") {
+		return representationurl
+	}
+
+	baseurl := strings.TrimSpace(mpdbaseurl)
+
+	if baseurl == "" {
+		baseurl = fallbackbaseurl
+	}
+
+	return fmt.Sprintf("%s/%s", strings.TrimSuffix(baseurl, "/"), strings.TrimPrefix(representationurl, "/"))
+}
+
+func (a *AdaptationSet) MediaType() string {
+	if contenttype := strings.TrimSpace(a.ContentType); contenttype != "" {
+		return contenttype
+	}
+
+	for i := range a.Representation {
+		mimetype := strings.TrimSpace(a.Representation[i].MimeType)
+
+		if mediatype, _, found := strings.Cut(mimetype, "/"); found {
+			return mediatype
+		}
+	}
+
+	return ""
+}
+
+func (a *AdaptationSet) DefaultKID() string {
+	for _, contentprotection := range a.ContentProtection {
+		if contentprotection.DefaultKID != "" {
+			return contentprotection.DefaultKID
+		}
+	}
+
+	return ""
 }
 
 func isDirExists(path string) bool {
@@ -188,7 +264,7 @@ func GetPlaylistDuration(mpddata *MPD) float64 {
 	return duration.Seconds()
 }
 
-func HandleDownloadTrack(mediatype string, id string, numberofsegments float64, baseurl string, initmp4 string, adaptation string, key string) error {
+func HandleDownloadTrack(output string, numberofsegments float64, baseurl string, initmp4 string, adaptation string, key string) error {
 	segmentCount := int(numberofsegments)
 
 	fmt.Println(fmt.Sprintf("%s%s", baseurl, initmp4))
@@ -303,29 +379,35 @@ func HandleDownloadTrack(mediatype string, id string, numberofsegments float64, 
 		}
 	}
 
+	return finalizeTrack(output, initmp4, key)
+}
+
+func finalizeTrack(output string, assembled string, key string) error {
 	if len(key) > 0 {
-		DecryptPlaylist(id, initmp4, key)
-	} else {
-		initfile, err := os.Open(fmt.Sprintf("./downloads/%s", initmp4))
+		DecryptPlaylist(output, assembled, key)
 
-		if err != nil {
-			return err
-		}
-
-		final_master, err := os.Create(fmt.Sprintf("master_%s.mp4", mediatype))
-
-		if err != nil {
-			return err
-		}
-
-		io.Copy(final_master, initfile)
-
-		final_master.Close()
-		initfile.Close()
-
+		return nil
 	}
 
-	return nil
+	assembledfile, err := os.Open(filepath.Join("downloads", assembled))
+
+		if err != nil {
+			return err
+		}
+
+	defer assembledfile.Close()
+
+	final_master, err := os.Create(fmt.Sprintf("%s.mp4", output))
+
+		if err != nil {
+			return err
+		}
+
+	defer final_master.Close()
+
+	_, err = io.Copy(final_master, assembledfile)
+
+	return err
 }
 
 func DecryptPlaylist(id string, initmp4 string, key string) {
